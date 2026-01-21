@@ -41,10 +41,12 @@ class DockerDeploymentConfig(BaseModel):
     """The platform to use for the container image."""
     remove_container: bool = True
     """Whether to remove the container after it has stopped."""
-    container_runtime: Literal["docker", "podman"] = "docker"
-    """The container runtime to use (docker or podman)."""
+    container_runtime: Literal["docker", "podman", "apptainer"] = "docker"
+    """The container runtime to use (docker, podman, or apptainer)."""
     exec_shell: list[str] = ["/bin/sh", "-c"]
     """The shell executable and arguments to use for running commands."""
+    apptainer_sif_cache_dir: str | None = None
+    """Directory to cache .sif files when using apptainer. If None, uses default cache location."""
     docker_internal_host: str = "http://127.0.0.1"
     """The host to use for connecting to the runtime.
     In most cases you can leave this as-is, however for docker-in-docker

@@ -121,4 +121,21 @@ output='' exit_code=0 failure_reason='' expect_string='SHELLPS1PREFIX' session_t
 output='test\n' exit_code=0 failure_reason='' expect_string='SHELLPS1PREFIX' session_type='bash'
 🦖 DEBUG    Ensuring deployment is stopped because object is deleted          
 ```
+
+## Running with Apptainer on HPC
+
+If you're working on an HPC cluster where Docker is not available, you can use [Apptainer](https://apptainer.org/) (formerly Singularity) instead:
+
+```python
+from swerex.deployment.docker import DockerDeployment
+
+deployment = DockerDeployment(
+    image="python:3.12",
+    container_runtime="apptainer"
+)
+asyncio.run(run_some_stuff(deployment))
+```
+
+Apptainer is designed for HPC environments and works without requiring root privileges. See the [Apptainer deployment guide](api/deployments/apptainer.md) for more details.
+
 {% include-markdown "_footer.md" %}

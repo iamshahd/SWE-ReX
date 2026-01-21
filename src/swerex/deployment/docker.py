@@ -23,6 +23,22 @@ __all__ = ["DockerDeployment", "DockerDeploymentConfig"]
 
 
 def _is_image_available(image: str, runtime: str = "docker") -> bool:
+    """Check if an image is available locally.
+    
+    For docker/podman: checks if the image exists in local registry.
+    For apptainer: checks if the .sif file exists.
+    """
+    if runtime == "apptainer":
+        # For apptainer, check if the .sif file exists
+        # Image might be docker://ubuntu:latest or path/to/image.sif
+        if image.endswith(".sif"):
+            from pathlib import Path
+            return Path(image).exists()
+        # If it's a docker:// URI, we need to check the cached .sif
+        # Apptainer caches in ~/.apptainer/cache or APPTAINER_CACHEDIR
+        # For now, return False to trigger a pull
+        return False
+    
     try:
         subprocess.check_call(
             [runtime, "inspect", image],
@@ -35,6 +51,23 @@ def _is_image_available(image: str, runtime: str = "docker") -> bool:
 
 
 def _pull_image(image: str, runtime: str = "docker") -> bytes:
+    """Pull an image.
+    
+    For docker/podman: pulls from registry.
+    For apptainer: pulls and converts to .sif format.
+    """
+    if runtime == "apptainer":
+        # Apptainer can pull from docker://, library://, shub://, etc.
+        # If no protocol, assume docker://
+        if not any(image.startswith(proto) for proto in ["docker://", "library://", "shub://", "oras://"]):
+            if not image.endswith(".sif"):
+                image = f"docker://{image}"
+        
+        try:
+            return subprocess.check_output([runtime, "pull", image], stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            raise subprocess.CalledProcessError(e.returncode, e.cmd, e.output, e.stderr) from None
+    
     try:
         return subprocess.check_output([runtime, "pull", image], stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
@@ -43,6 +76,23 @@ def _pull_image(image: str, runtime: str = "docker") -> bytes:
 
 
 def _remove_image(image: str, runtime: str = "docker") -> bytes:
+    """Remove an image.
+    
+    For docker/podman: removes from local registry.
+    For apptainer: removes the .sif file if it's a local file.
+    """
+    if runtime == "apptainer":
+        # For apptainer, if it's a .sif file, just remove it
+        if image.endswith(".sif"):
+            from pathlib import Path
+            path = Path(image)
+            if path.exists():
+                path.unlink()
+                return b"Removed " + image.encode()
+        # For docker:// URIs, the .sif is in cache, harder to find
+        # Skip for now as it's not critical
+        return b"Apptainer image removal not fully implemented for URIs"
+    
     return subprocess.check_output([runtime, "rmi", image], timeout=30)
 
 
@@ -77,6 +127,29 @@ class DockerDeployment(AbstractDeployment):
         """Returns a unique container name based on the image name."""
         image_name_sanitized = "".join(c for c in self._config.image if c.isalnum() or c in "-_.")
         return f"{image_name_sanitized}-{uuid.uuid4()}"
+    
+    def _get_sif_image_path(self, image: str) -> str:
+        """Convert a docker image reference to a .sif file path for Apptainer.
+        
+        Args:
+            image: Docker image reference like "ubuntu:latest" or "docker://ubuntu:latest"
+            
+        Returns:
+            Path to the .sif file that apptainer pull will create
+        """
+        # Remove docker:// prefix if present
+        clean_image = image.replace("docker://", "").replace("library://", "").replace(":", "_").replace("/", "_")
+        if not clean_image.endswith(".sif"):
+            clean_image = f"{clean_image}.sif"
+        
+        # Use cache dir if specified
+        if self._config.apptainer_sif_cache_dir:
+            from pathlib import Path
+            cache_dir = Path(self._config.apptainer_sif_cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            return str(cache_dir / clean_image)
+        
+        return clean_image
 
     @property
     def container_name(self) -> str | None:
@@ -117,8 +190,19 @@ class DockerDeployment(AbstractDeployment):
     def _get_token(self) -> str:
         return str(uuid.uuid4())
 
-    def _get_swerex_start_cmd(self, token: str) -> list[str]:
+    def _get_swerex_start_cmd(self, token: str, port: int | None = None) -> list[str]:
+        """Get the command to start the swerex server.
+        
+        Args:
+            token: Authentication token
+            port: Port to run server on (for apptainer with host networking)
+        """
         rex_args = f"--auth-token {token}"
+        
+        # For Apptainer with host networking, we need to specify the port
+        if port is not None and self._config.container_runtime == "apptainer":
+            rex_args += f" --port {port}"
+        
         pipx_install = "python3 -m pip install pipx && python3 -m pipx ensurepath"
         if self._config.python_standalone_dir:
             cmd = f"{self._config.python_standalone_dir}/python3.11/bin/{REMOTE_EXECUTABLE_NAME} {rex_args}"
@@ -131,14 +215,39 @@ class DockerDeployment(AbstractDeployment):
         ]
 
     def _pull_image(self) -> None:
+        """Pull container image if needed.
+        
+        For apptainer, this converts the image to a .sif file.
+        """
         if self._config.pull == "never":
             return
-        if self._config.pull == "missing" and _is_image_available(self._config.image, self._config.container_runtime):
+        
+        runtime = self._config.container_runtime
+        
+        # For apptainer, check if .sif file exists
+        if runtime == "apptainer":
+            sif_path = self._get_sif_image_path(self._config.image)
+            if self._config.pull == "missing":
+                from pathlib import Path
+                if Path(sif_path).exists():
+                    self.logger.info(f"Using existing .sif file: {sif_path}")
+                    return
+        elif self._config.pull == "missing" and _is_image_available(self._config.image, runtime):
             return
+            
         self.logger.info(f"Pulling image {self._config.image!r}")
         self._hooks.on_custom_step("Pulling container image")
         try:
-            _pull_image(self._config.image, self._config.container_runtime)
+            if runtime == "apptainer":
+                # Pull to specific .sif file
+                sif_path = self._get_sif_image_path(self._config.image)
+                image_uri = self._config.image
+                if not any(image_uri.startswith(p) for p in ["docker://", "library://", "shub://", "oras://"]):
+                    image_uri = f"docker://{image_uri}"
+                
+                subprocess.check_output([runtime, "pull", sif_path, image_uri], stderr=subprocess.PIPE)
+            else:
+                _pull_image(self._config.image, runtime)
         except subprocess.CalledProcessError as e:
             msg = f"Failed to pull image {self._config.image}. "
             msg += f"Error: {e.stderr.decode()}"
@@ -194,12 +303,73 @@ class DockerDeployment(AbstractDeployment):
         )
 
     def _build_image(self) -> str:
+        """Builds image, returns image ID/path.
+        
+        For docker/podman: returns image ID (sha256:...)
+        For apptainer: returns path to .sif file
+        """
         runtime = self._config.container_runtime
-        """Builds image, returns image ID."""
+        
         self.logger.info(
             f"Building image {self._config.image} to install a standalone python to {self._config.python_standalone_dir}. "
             "This might take a while (but you only have to do it once). To skip this step, set `python_standalone_dir` to None."
         )
+        
+        if runtime == "apptainer":
+            # For Apptainer, we need to create a definition file
+            # First, build a docker image, convert to .sif
+            self.logger.info("Building with Apptainer requires building Docker image first, then converting")
+            
+            # Build with docker first (if available)
+            try:
+                subprocess.check_output(["docker", "--version"], stderr=subprocess.DEVNULL)
+                has_docker = True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                has_docker = False
+            
+            if not has_docker:
+                msg = "Building with python_standalone_dir requires Docker to be available for initial build. "
+                msg += "Please either: 1) Install Docker, 2) Build the image elsewhere and copy the .sif file, "
+                msg += "or 3) Use an image that already has swe-rex installed."
+                raise RuntimeError(msg)
+            
+            # Build docker image
+            dockerfile = self.glibc_dockerfile
+            platform_arg = []
+            if self._config.platform:
+                platform_arg = ["--platform", self._config.platform]
+            
+            build_cmd = [
+                "docker",
+                "build",
+                "-q",
+                *platform_arg,
+                "--build-arg",
+                f"BASE_IMAGE={self._config.image}",
+                "-t",
+                "swerex-apptainer-temp",
+                "-",
+            ]
+            
+            subprocess.check_output(build_cmd, input=dockerfile.encode())
+            
+            # Convert to .sif
+            sif_path = self._get_sif_image_path(self._config.image + "-standalone")
+            self.logger.info(f"Converting Docker image to Apptainer .sif at {sif_path}")
+            subprocess.check_output(
+                ["apptainer", "build", sif_path, "docker-daemon://swerex-apptainer-temp:latest"],
+                stderr=subprocess.PIPE
+            )
+            
+            # Clean up docker image
+            try:
+                subprocess.check_output(["docker", "rmi", "swerex-apptainer-temp"], stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError:
+                pass
+            
+            return sif_path
+        
+        # Docker/Podman path
         dockerfile = self.glibc_dockerfile
         platform_arg = []
         if self._config.platform:
@@ -236,38 +406,90 @@ class DockerDeployment(AbstractDeployment):
         if self._config.python_standalone_dir:
             image_id = self._build_image()
         else:
-            image_id = self._config.image
+            if self._config.container_runtime == "apptainer":
+                image_id = self._get_sif_image_path(self._config.image)
+            else:
+                image_id = self._config.image
+        
         if self._config.port is None:
             self._config.port = find_free_port()
         assert self._container_name is None
         self._container_name = self._get_container_name()
         token = self._get_token()
-        platform_arg = []
-        if self._config.platform is not None:
-            platform_arg = ["--platform", self._config.platform]
-        rm_arg = []
-        if self._config.remove_container:
-            rm_arg = ["--rm"]
-        cmds = [
-            self._config.container_runtime,
-            "run",
-            *rm_arg,
-            "-p",
-            f"{self._config.port}:8000",
-            *platform_arg,
-            *self._config.docker_args,
-            "--name",
-            self._container_name,
-            image_id,
-            *self._get_swerex_start_cmd(token),
-        ]
-        cmd_str = shlex.join(cmds)
-        self.logger.info(
-            f"Starting container {self._container_name} with image {self._config.image} serving on port {self._config.port}"
-        )
-        self.logger.debug(f"Command: {cmd_str!r}")
-        # shell=True required for && etc.
-        self._container_process = subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        runtime = self._config.container_runtime
+        
+        if runtime == "apptainer":
+            # Apptainer uses instance-based model with host networking
+            # Start instance with the exec command wrapped
+            cmds = [
+                runtime,
+                "instance",
+                "start",
+                "--writable-tmpfs",  # Allow writes to /tmp
+                "--bind", "/tmp:/tmp",  # Bind /tmp for socket communication
+                "--net",  # Use host network (default, but explicit)
+                *self._config.docker_args,
+                image_id,
+                self._container_name,
+            ]
+            
+            cmd_str = shlex.join(cmds)
+            self.logger.info(
+                f"Starting Apptainer instance {self._container_name} with image {self._config.image} on port {self._config.port}"
+            )
+            self.logger.debug(f"Start instance command: {cmd_str!r}")
+            
+            # Start the instance
+            subprocess.check_call(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Now execute the swerex server inside the instance
+            # For Apptainer, we pass the port to the server since it uses host networking
+            exec_cmds = [
+                runtime,
+                "exec",
+                f"instance://{self._container_name}",
+                *self._get_swerex_start_cmd(token, port=self._config.port),
+            ]
+            
+            exec_cmd_str = shlex.join(exec_cmds)
+            self.logger.debug(f"Execute command: {exec_cmd_str!r}")
+            
+            # Run the server in the background
+            self._container_process = subprocess.Popen(
+                exec_cmds,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+        else:
+            # Docker/Podman path
+            platform_arg = []
+            if self._config.platform is not None:
+                platform_arg = ["--platform", self._config.platform]
+            rm_arg = []
+            if self._config.remove_container:
+                rm_arg = ["--rm"]
+            cmds = [
+                runtime,
+                "run",
+                *rm_arg,
+                "-p",
+                f"{self._config.port}:8000",
+                *platform_arg,
+                *self._config.docker_args,
+                "--name",
+                self._container_name,
+                image_id,
+                *self._get_swerex_start_cmd(token),
+            ]
+            cmd_str = shlex.join(cmds)
+            self.logger.info(
+                f"Starting container {self._container_name} with image {self._config.image} serving on port {self._config.port}"
+            )
+            self.logger.debug(f"Command: {cmd_str!r}")
+            # shell=True required for && etc.
+            self._container_process = subprocess.Popen(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
         self._hooks.on_custom_step("Starting runtime")
         self.logger.info(f"Starting runtime at {self._config.port}")
         self._runtime = RemoteRuntime.from_config(
@@ -288,19 +510,49 @@ class DockerDeployment(AbstractDeployment):
             await self._runtime.close()
             self._runtime = None
 
+        runtime = self._config.container_runtime
+        
         if self._container_process is not None:
-            try:
-                subprocess.check_call(
-                    [self._config.container_runtime, "kill", self._container_name],  # type: ignore
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10,
-                )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                self.logger.warning(
-                    f"Failed to kill container {self._container_name}: {e}. Will try harder.",
-                    exc_info=False,
-                )
+            if runtime == "apptainer":
+                # Stop the Apptainer instance
+                try:
+                    subprocess.check_call(
+                        [runtime, "instance", "stop", self._container_name],  # type: ignore
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    self.logger.warning(
+                        f"Failed to stop Apptainer instance {self._container_name}: {e}. Will try harder.",
+                        exc_info=False,
+                    )
+                    # Force stop
+                    try:
+                        subprocess.check_call(
+                            [runtime, "instance", "stop", "-f", self._container_name],  # type: ignore
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=10,
+                        )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        self.logger.warning(f"Failed to force stop Apptainer instance {self._container_name}")
+            else:
+                # Docker/Podman path
+                try:
+                    subprocess.check_call(
+                        [runtime, "kill", self._container_name],  # type: ignore
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    self.logger.warning(
+                        f"Failed to kill container {self._container_name}: {e}. Will try harder.",
+                        exc_info=False,
+                    )
+            
+            # Kill the process
             for _ in range(3):
                 self._container_process.kill()
                 try:
@@ -309,16 +561,16 @@ class DockerDeployment(AbstractDeployment):
                 except subprocess.TimeoutExpired:
                     continue
             else:
-                self.logger.warning(f"Failed to kill container {self._container_name} with SIGKILL")
+                self.logger.warning(f"Failed to kill container process for {self._container_name} with SIGKILL")
 
             self._container_process = None
             self._container_name = None
 
         if self._config.remove_images:
-            if _is_image_available(self._config.image, self._config.container_runtime):
+            if _is_image_available(self._config.image, runtime):
                 self.logger.info(f"Removing image {self._config.image}")
                 try:
-                    _remove_image(self._config.image, self._config.container_runtime)
+                    _remove_image(self._config.image, runtime)
                 except subprocess.CalledProcessError:
                     self.logger.error(f"Failed to remove image {self._config.image}", exc_info=True)
 

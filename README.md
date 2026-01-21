@@ -51,6 +51,28 @@ pip install 'swe-rex[dev]'
 
 Then head over to [our documentation](https://swe-rex.com/) to learn more!
 
+## Container Runtime Support
+
+SWE-ReX supports multiple container runtimes:
+
+- **Docker**: The standard containerization platform (default)
+- **Podman**: A daemonless Docker alternative
+- **Apptainer**: Designed for HPC clusters where Docker is not available (formerly Singularity)
+
+Simply set the `container_runtime` parameter when creating a deployment:
+
+```python
+from swerex.deployment.docker import DockerDeployment
+
+# Use Apptainer for HPC environments
+deployment = DockerDeployment(
+    image="python:3.11",
+    container_runtime="apptainer"  # or "docker" or "podman"
+)
+```
+
+See the [Apptainer deployment guide](https://swe-rex.com/latest/api/deployments/apptainer/) for HPC-specific usage.
+
 
 [SWE-agent]: https://swe-agent.com
 [SWE-bench]: https://swebench.com

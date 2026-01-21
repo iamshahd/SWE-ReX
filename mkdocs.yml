@@ -66,6 +66,7 @@ nav:
       - Local: api/deployments/local.md
       - Remote: api/deployments/remote.md
       - Docker: api/deployments/docker.md
+      - Apptainer: api/deployments/apptainer.md
       - Modal: api/deployments/modal.md
       - Fargate: api/deployments/fargate.md
       - Dummy: api/deployments/dummy.md
