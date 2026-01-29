@@ -420,46 +420,33 @@ class DockerDeployment(AbstractDeployment):
         runtime = self._config.container_runtime
         
         if runtime == "apptainer":
-            # Apptainer uses instance-based model with host networking
-            # Start instance with the exec command wrapped
+            # Apptainer: run SWE-ReX server as a long-lived process via `exec`
+            # (no instances, no --net; host network is used by default).
             cmds = [
                 runtime,
-                "instance",
-                "start",
-                "--writable-tmpfs",  # Allow writes to /tmp
-                "--bind", "/tmp:/tmp",  # Bind /tmp for socket communication
-                "--net",  # Use host network (default, but explicit)
-                *self._config.docker_args,
-                image_id,
-                self._container_name,
+                "exec",
+                "--writable-tmpfs",        # allow writes to /tmp in the container
+                "--bind", "/tmp:/tmp",     # for any tmp/socket work
+                *self._config.docker_args, # e.g. extra binds you configure in YAML
+                image_id,                  # this is your .sif path or docker:// URI
+                *self._get_swerex_start_cmd(
+                    token,
+                    port=self._config.port,
+                ),
             ]
-            
+
             cmd_str = shlex.join(cmds)
             self.logger.info(
-                f"Starting Apptainer instance {self._container_name} with image {self._config.image} on port {self._config.port}"
+                f"Starting Apptainer SWE-ReX server with image {self._config.image} "
+                f"serving on port {self._config.port}"
             )
-            self.logger.debug(f"Start instance command: {cmd_str!r}")
-            
-            # Start the instance
-            subprocess.check_call(cmds, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Now execute the swerex server inside the instance
-            # For Apptainer, we pass the port to the server since it uses host networking
-            exec_cmds = [
-                runtime,
-                "exec",
-                f"instance://{self._container_name}",
-                *self._get_swerex_start_cmd(token, port=self._config.port),
-            ]
-            
-            exec_cmd_str = shlex.join(exec_cmds)
-            self.logger.debug(f"Execute command: {exec_cmd_str!r}")
-            
-            # Run the server in the background
+            self.logger.debug(f"Apptainer exec command: {cmd_str!r}")
+
+            # Long-lived server process
             self._container_process = subprocess.Popen(
-                exec_cmds,
+                cmds,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
             )
         else:
             # Docker/Podman path
