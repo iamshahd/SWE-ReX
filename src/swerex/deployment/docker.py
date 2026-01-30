@@ -197,22 +197,38 @@ class DockerDeployment(AbstractDeployment):
             token: Authentication token
             port: Port to run server on (for apptainer with host networking)
         """
+        # --- Apptainer path: no pipx, no swerex-remote, no network installs ---
+        if self._config.container_runtime == "apptainer":
+            # For Apptainer we always want an explicit port, since we rely on host networking.
+            if port is None:
+                port = 8000
+
+            rex_args = f"--auth-token {token} --port {port}"
+
+            # Assumes `swerex` is already installed in the Apptainer image.
+            # We just start the server directly.
+            cmd = f"python -m swerex.server {rex_args}"
+
+            # Still respect exec_shell (usually ['/bin/sh', '-c']) for consistency.
+            return [*self._config.exec_shell, cmd]
+
+        # --- Docker / Podman path: keep existing behavior (swerex-remote + pipx fallback) ---
         rex_args = f"--auth-token {token}"
-        
-        # For Apptainer with host networking, we need to specify the port
-        if port is not None and self._config.container_runtime == "apptainer":
-            rex_args += f" --port {port}"
-        
+
         pipx_install = "python3 -m pip install pipx && python3 -m pipx ensurepath"
+
         if self._config.python_standalone_dir:
-            cmd = f"{self._config.python_standalone_dir}/python3.11/bin/{REMOTE_EXECUTABLE_NAME} {rex_args}"
+            cmd = (
+                f"{self._config.python_standalone_dir}/python3.11/bin/"
+                f"{REMOTE_EXECUTABLE_NAME} {rex_args}"
+            )
         else:
-            cmd = f"{REMOTE_EXECUTABLE_NAME} {rex_args} || ({pipx_install} && pipx run {PACKAGE_NAME} {rex_args})"
-        # Use exec_shell from config
-        return [
-            *self._config.exec_shell,
-            cmd,
-        ]
+            cmd = (
+                f"{REMOTE_EXECUTABLE_NAME} {rex_args} "
+                f"|| ({pipx_install} && pipx run {PACKAGE_NAME} {rex_args})"
+            )
+
+        return [*self._config.exec_shell, cmd]
 
     def _pull_image(self) -> None:
         """Pull container image if needed.
