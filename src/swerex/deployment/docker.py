@@ -514,37 +514,32 @@ class DockerDeployment(AbstractDeployment):
             self._runtime = None
 
         runtime = self._config.container_runtime
-        
+
         if self._container_process is not None:
             if runtime == "apptainer":
-                # Stop the Apptainer instance
+                # Stop the long-lived process.
+                self.logger.info(f"Stopping Apptainer SWE-ReX server process: {self._container_name}")
+                # Try graceful termination first.
+                self._container_process.terminate()
                 try:
-                    subprocess.check_call(
-                        [runtime, "instance", "stop", self._container_name],  # type: ignore
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                    )
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    self._container_process.wait(timeout=self._config.shutdown_timeout or 10)
+                except subprocess.TimeoutExpired:
                     self.logger.warning(
-                        f"Failed to stop Apptainer instance {self._container_name}: {e}. Will try harder.",
-                        exc_info=False,
+                        f"Graceful stop timed out; force killing Apptainer SWE-ReX server process: {self._container_name}"
                     )
-                    # Force stop
                     try:
-                        subprocess.check_call(
-                            [runtime, "instance", "stop", "-f", self._container_name],  # type: ignore
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=10,
+                        self._container_process.kill()
+                        self._container_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.logger.warning(
+                            f"Failed to reap Apptainer SWE-ReX server process after SIGKILL: {self._container_name}"
                         )
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                        self.logger.warning(f"Failed to force stop Apptainer instance {self._container_name}")
+
             else:
                 # Docker/Podman path
                 try:
                     subprocess.check_call(
-                        [runtime, "kill", self._container_name],  # type: ignore
+                        [runtime, "kill", self._container_name],  # type: ignore[arg-type]
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=10,
@@ -554,29 +549,34 @@ class DockerDeployment(AbstractDeployment):
                         f"Failed to kill container {self._container_name}: {e}. Will try harder.",
                         exc_info=False,
                     )
-            
-            # Kill the process
-            for _ in range(3):
-                self._container_process.kill()
-                try:
-                    self._container_process.wait(timeout=5)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            else:
-                self.logger.warning(f"Failed to kill container process for {self._container_name} with SIGKILL")
 
+                # As a fallback, ensure the underlying process is gone.
+                for _ in range(3):
+                    self._container_process.kill()
+                    try:
+                        self._container_process.wait(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                else:
+                    self.logger.warning(
+                        f"Failed to kill container process for {self._container_name} with SIGKILL"
+                    )
+
+            # Reset process/name in either case.
             self._container_process = None
             self._container_name = None
 
+        # Optional image cleanup (works for both docker/podman and your apptainer-aware helpers).
         if self._config.remove_images:
             if _is_image_available(self._config.image, runtime):
                 self.logger.info(f"Removing image {self._config.image}")
                 try:
                     _remove_image(self._config.image, runtime)
                 except subprocess.CalledProcessError:
-                    self.logger.error(f"Failed to remove image {self._config.image}", exc_info=True)
-
+                    self.logger.error(
+                        f"Failed to remove image {self._config.image}", exc_info=True
+                    )
     @property
     def runtime(self) -> RemoteRuntime:
         """Returns the runtime if running.
