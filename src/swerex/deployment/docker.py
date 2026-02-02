@@ -522,7 +522,7 @@ class DockerDeployment(AbstractDeployment):
                 # Try graceful termination first.
                 self._container_process.terminate()
                 try:
-                    self._container_process.wait(timeout=self._config.shutdown_timeout or 10)
+                    self._container_process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     self.logger.warning(
                         f"Graceful stop timed out; force killing Apptainer SWE-ReX server process: {self._container_name}"
