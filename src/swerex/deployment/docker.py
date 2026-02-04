@@ -446,7 +446,7 @@ class DockerDeployment(AbstractDeployment):
             cmds = [
                 runtime,
                 "exec",
-                "--writable-tmpfs",        # allow writes to /tmp in the container
+                # "--writable-tmpfs",        # allow writes to /tmp in the container
                 "--bind", "/tmp:/tmp",     # for any tmp/socket work
                 *self._config.docker_args, # e.g. extra binds you configure in YAML
                 image_id,                  # this is your .sif path or docker:// URI
