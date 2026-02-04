@@ -419,11 +419,14 @@ class DockerDeployment(AbstractDeployment):
     async def start(self):
         """Starts the runtime."""
         self._pull_image()
-        if self._config.python_standalone_dir:
-            image_id = self._build_image()
+        runtime = self._config.container_runtime
+
+        if runtime == "apptainer":
+            # Apptainer path: ALWAYS run base SIF; ignore python_standalone_dir
+            image_id = self._get_sif_image_path(self._config.image)
         else:
-            if self._config.container_runtime == "apptainer":
-                image_id = self._get_sif_image_path(self._config.image)
+            if self._config.python_standalone_dir:
+                image_id = self._build_image()
             else:
                 image_id = self._config.image
         
@@ -432,9 +435,7 @@ class DockerDeployment(AbstractDeployment):
         assert self._container_name is None
         self._container_name = self._get_container_name()
         token = self._get_token()
-        
-        runtime = self._config.container_runtime
-        
+                
         if runtime == "apptainer":
             # Apptainer: run SWE-ReX server as a long-lived process via `exec`
             # (no instances, no --net; host network is used by default).
