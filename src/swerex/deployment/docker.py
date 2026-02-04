@@ -1,4 +1,5 @@
 import logging
+import os
 import shlex
 import subprocess
 import time
@@ -439,6 +440,9 @@ class DockerDeployment(AbstractDeployment):
         if runtime == "apptainer":
             # Apptainer: run SWE-ReX server as a long-lived process via `exec`
             # (no instances, no --net; host network is used by default).
+            sweagent_apptainer_overlay = os.getenv("SWEAGENT_APPTAINER_OVERLAY")
+            if sweagent_apptainer_overlay:
+                self._config.docker_args.extend(["--overlay", sweagent_apptainer_overlay])
             cmds = [
                 runtime,
                 "exec",
