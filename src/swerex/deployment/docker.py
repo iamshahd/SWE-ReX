@@ -207,8 +207,13 @@ class DockerDeployment(AbstractDeployment):
             rex_args = f"--auth-token {token} --port {port}"
 
             # Assumes `swerex` is already installed in the Apptainer image.
-            # We just start the server directly.
-            cmd = f"python -m swerex.server {rex_args}"
+            # If SWEAGENT_SWEREX_PKGDIR is set, prepend PYTHONPATH so swerex
+            # can be found from a host-mounted directory (see start() for the bind).
+            swerex_pkgdir = os.getenv("SWEAGENT_SWEREX_PKGDIR")
+            if swerex_pkgdir:
+                cmd = f"PYTHONPATH=/swerex-pkgs python3 -m swerex.server {rex_args}"
+            else:
+                cmd = f"python -m swerex.server {rex_args}"
 
             # Still respect exec_shell (usually ['/bin/sh', '-c']) for consistency.
             return [*self._config.exec_shell, cmd]
@@ -442,11 +447,25 @@ class DockerDeployment(AbstractDeployment):
             # (no instances, no --net; host network is used by default).
             sweagent_apptainer_overlay = os.getenv("SWEAGENT_APPTAINER_OVERLAY")
             if sweagent_apptainer_overlay:
-                self._config.docker_args.extend(["--overlay", sweagent_apptainer_overlay])
+                # Mount read-only so multiple workers can share the same overlay simultaneously
+                self._config.docker_args.extend(["--overlay", sweagent_apptainer_overlay + ":ro"])
+            swerex_pkgdir = os.getenv("SWEAGENT_SWEREX_PKGDIR")
+            if swerex_pkgdir:
+                # Bind-mount a host directory containing swerex + deps into the container
+                self._config.docker_args.extend(["--bind", f"{swerex_pkgdir}:/swerex-pkgs"])
+            # Use a directory overlay on scratch instead of in-memory tmpfs when available.
+            # --writable-tmpfs has a small default size that gets exhausted by tool uploads.
+            writable_overlay_base = os.getenv("SWEAGENT_APPTAINER_WRITABLE_OVERLAY_DIR")
+            if writable_overlay_base:
+                writable_overlay_dir = os.path.join(writable_overlay_base, self._container_name)
+                os.makedirs(writable_overlay_dir, exist_ok=True)
+                writable_flag = ["--overlay", writable_overlay_dir]
+            else:
+                writable_flag = ["--writable-tmpfs"]
             cmds = [
                 runtime,
                 "exec",
-                # "--writable-tmpfs",        # allow writes to /tmp in the container
+                *writable_flag,            # allow writes inside the container (e.g. /testbed)
                 "--bind", "/tmp:/tmp",     # for any tmp/socket work
                 *self._config.docker_args, # e.g. extra binds you configure in YAML
                 image_id,                  # this is your .sif path or docker:// URI
